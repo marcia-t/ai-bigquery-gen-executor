@@ -147,6 +147,19 @@ class DirectBigQueryExecutor:
                     "❌ Please specify table as 'dataset.table' (e.g., 'describe bi.my_table')",
                 )
 
+        # Show thresholds info
+        if question_lower in ["thresholds", "limits", "confirmation-settings"]:
+            info = f"""⚙️  Query Execution Thresholds:
+   📊 Warning threshold: 100 MB / $0.01 USD (shows warning)
+   🚨 Force confirmation: 500 MB / $0.025 USD (requires confirmation even in CLI mode)
+   🔄 Mode: {'Interactive' if len(sys.argv) == 1 else 'Command-line'}
+   
+   Behavior:
+   • Small queries (<100MB): Execute automatically
+   • Medium queries (100MB-500MB): Warn in CLI mode, confirm in interactive mode  
+   • Large queries (>500MB): Always require confirmation"""
+            return True, info
+
         # Quick help
         if question_lower in ["help", "commands", "?"]:
             help_text = """🆘 Available Commands:
@@ -194,7 +207,7 @@ class DirectBigQueryExecutor:
         return self.ai_generator.generate_sql_with_ai(question)
 
     def execute_query(self, sql: str) -> Dict[str, Any]:
-        """Execute SQL query directly against BigQuery"""
+        """Execute SQL query directly against BigQuery with bytes estimation"""
         if not self.client:
             return {
                 "status": "error",
@@ -202,6 +215,52 @@ class DirectBigQueryExecutor:
                 "sql": sql,
             }
 
+        # First, estimate the bytes that will be processed
+        print("🔍 Estimating query cost...")
+        estimation = self.estimate_query_bytes(sql)
+        
+        if estimation["status"] == "success":
+            print(f"📊 Query will process: {self.format_bytes(estimation['estimated_bytes'])}")
+            print(f"💰 Estimated cost: ${estimation['estimated_cost_usd']:.4f} USD")
+            
+            # Check if confirmation is needed for large queries
+            if self.should_confirm_execution(estimation):
+                print("⚠️  This query will process a significant amount of data!")
+                print(f"   Data to process: {self.format_bytes(estimation['estimated_bytes'])}")
+                print(f"   Estimated cost: ${estimation['estimated_cost_usd']:.4f} USD")
+                
+                # Check if this needs confirmation even in command-line mode
+                force_confirm = self.should_force_confirm_execution(estimation)
+                
+                # In interactive mode OR for very expensive queries, ask for confirmation
+                if len(sys.argv) == 1 or force_confirm:  # Interactive mode OR force confirm
+                    try:
+                        mode_msg = "(very expensive query)" if force_confirm and len(sys.argv) > 1 else ""
+                        confirm = input(f"   Continue? (y/N) {mode_msg}: ").strip().lower()
+                        if confirm not in ['y', 'yes']:
+                            print("❌ Query execution cancelled by user")
+                            return {
+                                "status": "cancelled",
+                                "sql": sql,
+                                "estimation": estimation,
+                                "timestamp": datetime.now().isoformat(),
+                            }
+                    except KeyboardInterrupt:
+                        print("\n❌ Query execution cancelled by user")
+                        return {
+                            "status": "cancelled",
+                            "sql": sql,
+                            "estimation": estimation,
+                            "timestamp": datetime.now().isoformat(),
+                        }
+                else:
+                    # In command-line mode for moderately expensive queries, show warning but continue
+                    print("   ⚠️  Continuing with large query (command-line mode)")
+        else:
+            print(f"⚠️  Could not estimate query cost: {estimation.get('error', 'Unknown error')}")
+            print("   Proceeding with execution...")
+
+        print()
         print("⚡ Executing query:")
         print(f"   {sql}")
         print()
@@ -226,12 +285,21 @@ class DirectBigQueryExecutor:
                 "data": rows,
                 "row_count": len(rows),
                 "bytes_processed": query_job.total_bytes_processed,
+                "bytes_estimated": estimation.get("estimated_bytes") if estimation["status"] == "success" else None,
                 "timestamp": datetime.now().isoformat(),
             }
 
             print("✅ Query executed successfully!")
             print(f"   Rows returned: {len(rows)}")
-            print(f"   Bytes processed: {query_job.total_bytes_processed:,}")
+            print(f"   Bytes processed: {self.format_bytes(query_job.total_bytes_processed)}")
+            
+            # Show estimation accuracy if available
+            if estimation["status"] == "success":
+                estimated = estimation["estimated_bytes"]
+                actual = query_job.total_bytes_processed
+                if estimated > 0:
+                    accuracy = (actual / estimated) * 100
+                    print(f"   Estimation accuracy: {accuracy:.1f}%")
 
             return response
 
@@ -244,6 +312,7 @@ class DirectBigQueryExecutor:
                 "status": "error",
                 "sql": sql,
                 "error": error_msg,
+                "estimation": estimation if estimation["status"] == "success" else None,
                 "timestamp": datetime.now().isoformat(),
             }
             
@@ -709,6 +778,75 @@ class DirectBigQueryExecutor:
         else:
             return "**General data table** - contains mixed data types for various purposes"
 
+    def estimate_query_bytes(self, sql: str) -> Dict[str, Any]:
+        """Estimate bytes that will be processed by a query without executing it"""
+        if not self.client:
+            return {"status": "error", "error": "BigQuery client not initialized"}
+
+        try:
+            # Create a dry run job to estimate bytes
+            job_config = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
+            query_job = self.client.query(sql, job_config=job_config)
+            
+            estimated_bytes = query_job.total_bytes_processed
+            estimated_mb = estimated_bytes / (1024 * 1024)
+            estimated_gb = estimated_bytes / (1024 * 1024 * 1024)
+            
+            # Estimate cost (approximate, as of 2024: $5 per TB)
+            estimated_cost_usd = (estimated_bytes / (1024 * 1024 * 1024 * 1024)) * 5
+            
+            return {
+                "status": "success",
+                "estimated_bytes": estimated_bytes,
+                "estimated_mb": estimated_mb,
+                "estimated_gb": estimated_gb,
+                "estimated_cost_usd": estimated_cost_usd,
+                "sql": sql
+            }
+            
+        except Exception as e:
+            return {
+                "status": "error", 
+                "error": str(e),
+                "sql": sql
+            }
+
+    def format_bytes(self, bytes_count: int) -> str:
+        """Format bytes in human-readable format"""
+        if bytes_count == 0:
+            return "0 bytes"
+        elif bytes_count < 1024:
+            return f"{bytes_count} bytes"
+        elif bytes_count < 1024 * 1024:
+            return f"{bytes_count / 1024:.1f} KB"
+        elif bytes_count < 1024 * 1024 * 1024:
+            return f"{bytes_count / (1024 * 1024):.1f} MB"
+        else:
+            return f"{bytes_count / (1024 * 1024 * 1024):.2f} GB"
+
+    def should_confirm_execution(self, estimation: Dict[str, Any]) -> bool:
+        """Determine if user confirmation is needed based on query size"""
+        if estimation["status"] != "success":
+            return False
+            
+        # Thresholds for confirmation
+        bytes_threshold = 100 * 1024 * 1024  # 100 MB
+        cost_threshold = 0.01  # $0.01 USD
+        
+        return (estimation["estimated_bytes"] > bytes_threshold or 
+                estimation["estimated_cost_usd"] > cost_threshold)
+
+    def should_force_confirm_execution(self, estimation: Dict[str, Any]) -> bool:
+        """Determine if confirmation is REQUIRED even in command-line mode"""
+        if estimation["status"] != "success":
+            return False
+            
+        # More aggressive thresholds that require confirmation even in CLI mode
+        force_bytes_threshold = 500 * 1024 * 1024  # 500 MB
+        force_cost_threshold = 0.025  # $0.025 USD
+        
+        return (estimation["estimated_bytes"] > force_bytes_threshold or 
+                estimation["estimated_cost_usd"] > force_cost_threshold)
 
 def main():
     """Main entry point"""

@@ -9,7 +9,8 @@ This workspace contains a streamlined BigQuery agent that generates and executes
 - **💾 Auto-Save**: Saves all results as JSON files with date-ordered names
 - **🧠 Thinking Steps**: Shows AI reasoning before generating queries
 - **🔒 Cost-Safe**: Includes safety limits and smart query patterns
-- **📁 Organized**: Date-ordered filenames for easy chronological tracking
+- **� Bytes Estimation**: Shows data processed and cost before running queries
+- **�📁 Organized**: Date-ordered filenames for easy chronological tracking
 - **🚀 Enhanced Discovery**: Built-in metadata commands for easy exploration
 - **📋 Smart Context**: AI gets table/column information for better query generation
 - **🔧 AI Error Analysis**: When queries fail, AI analyzes errors and suggests fixes
@@ -98,11 +99,36 @@ python3 bigquery_ai_gen_exec.py "what are the top 5 most common values in host_a
 2. **Metadata Context**: The system provides table/column context to the AI when relevant
 3. **AI Analysis**: Gemini AI analyzes the question and shows thinking steps  
 4. **Query Generation**: AI generates optimized BigQuery SQL (with metadata awareness)
-5. **Immediate Execution**: Query runs automatically (no confirmations)
-6. **Results Display**: Results shown in console with summary
-7. **Auto-Save**: Full results saved as JSON with date-ordered filename
+5. **Bytes Estimation**: System estimates data to be processed and shows cost before execution
+6. **Confirmation**: For large queries (>100MB), asks for confirmation in interactive mode
+7. **Execution**: Query runs with real-time progress and estimation accuracy
+8. **Results Display**: Results shown in console with summary
+9. **Auto-Save**: Full results saved as JSON with date-ordered filename
 
 ## 🔥 Advanced Features
+
+### Cost Estimation & Protection
+Before executing any query, the system estimates the data that will be processed:
+
+```
+🔍 Estimating query cost...
+📊 Query will process: 45.2 MB
+💰 Estimated cost: $0.0002 USD
+
+⚡ Executing query...
+✅ Query executed successfully!
+   Rows returned: 1,247
+   Bytes processed: 47.1 MB
+   Estimation accuracy: 95.8%
+```
+
+**For large queries (>100MB or >$0.01):**
+```
+⚠️  This query will process a significant amount of data!
+   Data to process: 2.3 GB
+   Estimated cost: $0.0115 USD
+   Continue? (y/N):
+```
 
 ### AI Error Analysis & Recovery
 When queries fail, the AI automatically analyzes the error and provides helpful suggestions:
@@ -192,10 +218,17 @@ bigquery_gen_executor/
 **Cache Issues**: See `CACHING_GUIDE.md` for detailed cache management help
 **Slow Performance**: Use `cache-info` to check cache status, `clear-cache` to reset if needed
 
-## 🔐 Security & Cost
+## 🔐 Security & Cost Protection
 
-- All queries include safety LIMIT clauses
-- No DDL operations (CREATE, DROP, etc.)
-- AI generates read-only SELECT statements
-- Metadata queries use efficient INFORMATION_SCHEMA patterns
-- Results are cached to minimize repeated metadata queries
+- **Bytes Estimation**: Every query shows estimated data processing and cost before execution
+- **Confirmation Prompts**: Large queries (>100MB or >$0.01) require confirmation in interactive mode
+- **Estimation Accuracy**: Shows how accurate the estimation was after execution
+- **Safety LIMIT clauses**: All AI-generated queries include appropriate LIMIT clauses
+- **Read-only Operations**: No DDL operations (CREATE, DROP, etc.) - only SELECT statements
+- **Efficient Patterns**: Metadata queries use optimized INFORMATION_SCHEMA patterns
+- **Smart Caching**: Results cached to minimize repeated metadata queries and costs
+
+**Cost Thresholds:**
+- Queries >100MB: Shows warning and asks for confirmation
+- Queries >$0.01: Requires explicit user confirmation
+- Command-line mode: Shows warnings but continues (for automation)
