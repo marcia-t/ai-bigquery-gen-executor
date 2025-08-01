@@ -160,7 +160,7 @@ python3 bigquery_ai_gen_exec.py "describe bi.profiling_data"
    🔢 Metrics/Numbers: ess_logs, ess_logs_GB, clusters_ingest_logs
    📝 Text data: cluster_name, real_cluster_name
 🔍 Sample insights:
-   • cluster_name: dd956fef7fee47b1a2bb8d5b3c1d830b
+   • cluster-name: *****
 ```
 
 ### Smart Metadata Caching
