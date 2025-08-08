@@ -7,6 +7,7 @@ Provides persistent file-based caching with expiration support.
 
 import json
 import os
+import time
 from datetime import datetime, timedelta
 from typing import Any, Dict
 
@@ -14,9 +15,13 @@ from typing import Any, Dict
 class MetadataCache:
     """Cache for BigQuery schema metadata to improve user experience"""
 
-    def __init__(self, client, project_id: str):
+    def __init__(self, client, project_id: str, cache_dir=".cache", cache_ttl=3600):
         self.client = client
         self.project_id = project_id
+        self.cache_dir = cache_dir
+        self.cache_ttl = cache_ttl
+        os.makedirs(cache_dir, exist_ok=True)
+
         self.datasets_cache = {}
         self.tables_cache = {}
         self.columns_cache = {}
@@ -37,10 +42,14 @@ class MetadataCache:
                 cache_data = json.load(f)
 
             # Check if cache is expired - try both field names for compatibility
-            cache_timestamp = cache_data.get("cache_timestamp") or cache_data.get("timestamp")
+            cache_timestamp = cache_data.get("cache_timestamp") or cache_data.get(
+                "timestamp"
+            )
             if cache_timestamp:
                 cache_time = datetime.fromisoformat(cache_timestamp)
-                if datetime.now() - cache_time > timedelta(hours=self.cache_expiry_hours):
+                if datetime.now() - cache_time > timedelta(
+                    hours=self.cache_expiry_hours
+                ):
                     print("📋 Cache expired, will refresh on next use")
                     return
 
@@ -56,7 +65,9 @@ class MetadataCache:
                 len(tc.get("tables", [])) for tc in self.tables_cache.values()
             )
 
-            print(f"📋 Loaded cached metadata: {datasets_count} datasets, {tables_count} tables")
+            print(
+                f"📋 Loaded cached metadata: {datasets_count} datasets, {tables_count} tables"
+            )
 
         except Exception as e:
             print(f"⚠️  Could not load cache: {e}")
@@ -81,7 +92,9 @@ class MetadataCache:
                 len(tc.get("tables", [])) for tc in self.tables_cache.values()
             )
 
-            print(f"💾 Saved metadata cache: {datasets_count} datasets, {tables_count} tables")
+            print(
+                f"💾 Saved metadata cache: {datasets_count} datasets, {tables_count} tables"
+            )
 
         except Exception as e:
             print(f"⚠️  Could not save cache: {e}")
@@ -212,7 +225,9 @@ class MetadataCache:
         tables = cache_data.get("tables", [])
 
         if not tables:
-            return f"No tables found in dataset '{dataset_name}' or dataset doesn't exist."
+            return (
+                f"No tables found in dataset '{dataset_name}' or dataset doesn't exist."
+            )
 
         summary = f"📋 Tables in '{dataset_name}' ({len(tables)}):\n"
         for table in tables[:20]:  # Show first 20 tables
@@ -295,7 +310,7 @@ class MetadataCache:
         """Clear only the cached descriptions while keeping schema data"""
         try:
             descriptions_cleared = 0
-            
+
             # Remove descriptions from columns cache
             for table_key, table_data in self.columns_cache.items():
                 if "description" in table_data:
@@ -303,10 +318,10 @@ class MetadataCache:
                     descriptions_cleared += 1
                 if "description_timestamp" in table_data:
                     del table_data["description_timestamp"]
-            
+
             # Save updated cache
             self.save_cache_to_file()
-            
+
             if descriptions_cleared > 0:
                 return f"🧹 Cleared {descriptions_cleared} cached table descriptions! Schema data remains cached."
             else:
@@ -341,10 +356,11 @@ class MetadataCache:
                     len(tc.get("tables", [])) for tc in self.tables_cache.values()
                 )
                 columns_count = len(self.columns_cache)
-                
+
                 # Count descriptions
                 descriptions_count = sum(
-                    1 for table_data in self.columns_cache.values()
+                    1
+                    for table_data in self.columns_cache.values()
                     if table_data.get("description")
                 )
 
@@ -367,3 +383,116 @@ class MetadataCache:
 
         except Exception as e:
             return f"❌ Failed to get cache info: {e}"
+
+    def _is_cache_valid(self, key: str) -> bool:
+        """Check if cache entry is valid (not expired)"""
+        cache_file = os.path.join(self.cache_dir, f"{key}.json")
+        if not os.path.exists(cache_file):
+            return False
+
+        try:
+            file_age = time.time() - os.path.getmtime(cache_file)
+            return file_age < self.cache_ttl
+        except Exception:
+            return False
+
+    def get(self, key: str):
+        """Get item from cache"""
+        cache_file = os.path.join(self.cache_dir, f"{key}.json")
+        print(f"🔍 Looking for cache file: {cache_file}")
+
+        if not self._is_cache_valid(key):
+            print(f"❌ Cache invalid or expired for: {key}")
+            return None
+
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, "r") as f:
+                    data = json.load(f)
+                print(f"✅ Found valid cache for: {key}")
+                return data
+            except Exception as e:
+                print(f"❌ Error reading cache file {cache_file}: {e}")
+                return None
+        else:
+            print(f"❌ Cache file does not exist: {cache_file}")
+        return None
+
+    def set(self, key: str, value):
+        """Set item in cache"""
+        cache_file = os.path.join(self.cache_dir, f"{key}.json")
+        try:
+            # Ensure cache directory exists
+            os.makedirs(self.cache_dir, exist_ok=True)
+
+            with open(cache_file, "w") as f:
+                json.dump(value, f, indent=2, default=str)
+
+            print(f"💾 Cached: {key}")
+            return True
+        except Exception as e:
+            print(f"❌ Failed to cache {key}: {e}")
+            return False
+
+    def get_table_schema(self, project_id: str, dataset_id: str, table_id: str):
+        """Get table schema from cache using the existing cache structure"""
+        cache_key = f"table_schema_{project_id}_{dataset_id}_{table_id}"
+
+        # Try to get from cache file
+        if hasattr(self, "cache_file") and os.path.exists(self.cache_file):
+            try:
+                with open(self.cache_file, "r") as f:
+                    cache_data = json.load(f)
+
+                if cache_key in cache_data:
+                    # Check if cache is still valid
+                    cached_item = cache_data[cache_key]
+                    if "timestamp" in cached_item:
+                        cache_time = datetime.fromisoformat(cached_item["timestamp"])
+                        if datetime.now() - cache_time < timedelta(hours=24):
+                            print(
+                                f"✅ Found cached schema for {project_id}.{dataset_id}.{table_id}"
+                            )
+                            return cached_item["data"]
+            except Exception as e:
+                print(f"❌ Error reading cache: {e}")
+
+        return None
+
+    def save_table_schema(
+        self, project_id: str, dataset_id: str, table_id: str, schema
+    ):
+        """Save table schema to cache using the existing cache structure"""
+        cache_key = f"table_schema_{project_id}_{dataset_id}_{table_id}"
+
+        # Load existing cache data
+        cache_data = {}
+        if hasattr(self, "cache_file") and os.path.exists(self.cache_file):
+            try:
+                with open(self.cache_file, "r") as f:
+                    cache_data = json.load(f)
+            except Exception:
+                pass
+
+        # Add schema to cache
+        cache_data[cache_key] = {
+            "timestamp": datetime.now().isoformat(),
+            "data": schema,
+        }
+
+        # Save back to cache file
+        try:
+            if hasattr(self, "cache_file"):
+                with open(self.cache_file, "w") as f:
+                    json.dump(cache_data, f, indent=2, default=str)
+                print(f"✅ Schema cached for {project_id}.{dataset_id}.{table_id}")
+            else:
+                print("❌ No cache file defined for saving schema")
+        except Exception as e:
+            print(f"❌ Error saving schema to cache: {e}")
+
+        # Save the updated metadata to the main cache file
+        self.save_metadata()
+        print(
+            f"✅ Schema saved to main metadata cache for {project_id}.{dataset_id}.{table_id}"
+        )

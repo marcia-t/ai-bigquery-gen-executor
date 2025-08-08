@@ -16,8 +16,9 @@ Requires:
 import csv
 import json
 import os
+import re
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Dict, Tuple
 
 try:
@@ -42,8 +43,8 @@ except ImportError:
     print("   Install with: pip install google-generativeai")
 
 # Import our custom modules
-from metadata_cache import MetadataCache
 from ai_query_generator import AIQueryGenerator
+from metadata_cache import MetadataCache
 
 
 class DirectBigQueryExecutor:
@@ -101,13 +102,28 @@ class DirectBigQueryExecutor:
             return False, ""
 
         # Cache management commands
-        if question_lower in ["clear-cache", "clear cache", "clean-cache", "clean cache"]:
+        if question_lower in [
+            "clear-cache",
+            "clear cache",
+            "clean-cache",
+            "clean cache",
+        ]:
             return True, self.metadata_cache.clear_cache()
-        
-        if question_lower in ["clear-descriptions", "clear descriptions", "clean-descriptions", "clean descriptions"]:
+
+        if question_lower in [
+            "clear-descriptions",
+            "clear descriptions",
+            "clean-descriptions",
+            "clean descriptions",
+        ]:
             return True, self.metadata_cache.clear_descriptions()
 
-        if question_lower in ["cache-info", "cache info", "cache-status", "cache status"]:
+        if question_lower in [
+            "cache-info",
+            "cache info",
+            "cache-status",
+            "cache status",
+        ]:
             return True, self.metadata_cache.get_cache_info()
 
         # Show datasets
@@ -138,9 +154,7 @@ class DirectBigQueryExecutor:
             table_ref = question_lower.replace("describe ", "").strip()
             if "." in table_ref:
                 dataset_name, table_name = table_ref.split(".", 1)
-                return True, self.describe_table_data(
-                    dataset_name, table_name
-                )
+                return True, self.describe_table_data(dataset_name, table_name)
             else:
                 return (
                     True,
@@ -152,7 +166,7 @@ class DirectBigQueryExecutor:
             info = f"""⚙️  Query Execution Thresholds:
    📊 Warning threshold: 100 MB / $0.01 USD (shows warning)
    🚨 Force confirmation: 500 MB / $0.025 USD (requires confirmation even in CLI mode)
-   🔄 Mode: {'Interactive' if len(sys.argv) == 1 else 'Command-line'}
+   🔄 Mode: {"Interactive" if len(sys.argv) == 1 else "Command-line"}
    
    Behavior:
    • Small queries (<100MB): Execute automatically
@@ -203,8 +217,35 @@ class DirectBigQueryExecutor:
             error_msg = "AI query generation is not available. Please set GEMINI_API_KEY or GOOGLE_API_KEY environment variable."
             return None, error_msg
 
-        print("🤖 Using AI to generate query...")
-        return self.ai_generator.generate_sql_with_ai(question)
+        print("🔍 Analyzing question for table references...")
+
+        # Extract and fetch table schemas
+        table_refs = extract_table_references(question, self.client.project)
+        schemas = {}
+
+        if table_refs:
+            print(f"🔍 Found {len(table_refs)} table reference(s) in user input")
+
+            for project_id, dataset_id, table_id in table_refs:
+                full_table_name = f"{project_id}.{dataset_id}.{table_id}"
+                schema = get_table_schema_from_existing_command(
+                    project_id, dataset_id, table_id, self.client, self.metadata_cache
+                )
+                if schema:
+                    schemas[full_table_name] = schema
+
+        if schemas:
+            print(f"✅ Using schema context for {len(schemas)} table(s)")
+            schema_context = build_schema_context(schemas)
+            enhanced_question = (
+                f"Using the following table schemas:\n{schema_context}\n\n"
+                f"Original question: {question}"
+            )
+            return self.ai_generator.generate_sql_with_ai(
+                enhanced_question, schemas
+            ), None
+        else:
+            return self.ai_generator.generate_sql_with_ai(question, schemas), None
 
     def execute_query(self, sql: str) -> Dict[str, Any]:
         """Execute SQL query directly against BigQuery with bytes estimation"""
@@ -218,26 +259,38 @@ class DirectBigQueryExecutor:
         # First, estimate the bytes that will be processed
         print("🔍 Estimating query cost...")
         estimation = self.estimate_query_bytes(sql)
-        
+
         if estimation["status"] == "success":
-            print(f"📊 Query will process: {self.format_bytes(estimation['estimated_bytes'])}")
+            print(
+                f"📊 Query will process: {self.format_bytes(estimation['estimated_bytes'])}"
+            )
             print(f"💰 Estimated cost: ${estimation['estimated_cost_usd']:.4f} USD")
-            
+
             # Check if confirmation is needed for large queries
             if self.should_confirm_execution(estimation):
                 print("⚠️  This query will process a significant amount of data!")
-                print(f"   Data to process: {self.format_bytes(estimation['estimated_bytes'])}")
+                print(
+                    f"   Data to process: {self.format_bytes(estimation['estimated_bytes'])}"
+                )
                 print(f"   Estimated cost: ${estimation['estimated_cost_usd']:.4f} USD")
-                
+
                 # Check if this needs confirmation even in command-line mode
                 force_confirm = self.should_force_confirm_execution(estimation)
-                
+
                 # In interactive mode OR for very expensive queries, ask for confirmation
-                if len(sys.argv) == 1 or force_confirm:  # Interactive mode OR force confirm
+                if (
+                    len(sys.argv) == 1 or force_confirm
+                ):  # Interactive mode OR force confirm
                     try:
-                        mode_msg = "(very expensive query)" if force_confirm and len(sys.argv) > 1 else ""
-                        confirm = input(f"   Continue? (y/N) {mode_msg}: ").strip().lower()
-                        if confirm not in ['y', 'yes']:
+                        mode_msg = (
+                            "(very expensive query)"
+                            if force_confirm and len(sys.argv) > 1
+                            else ""
+                        )
+                        confirm = (
+                            input(f"   Continue? (y/N) {mode_msg}: ").strip().lower()
+                        )
+                        if confirm not in ["y", "yes"]:
                             print("❌ Query execution cancelled by user")
                             return {
                                 "status": "cancelled",
@@ -257,7 +310,9 @@ class DirectBigQueryExecutor:
                     # In command-line mode for moderately expensive queries, show warning but continue
                     print("   ⚠️  Continuing with large query (command-line mode)")
         else:
-            print(f"⚠️  Could not estimate query cost: {estimation.get('error', 'Unknown error')}")
+            print(
+                f"⚠️  Could not estimate query cost: {estimation.get('error', 'Unknown error')}"
+            )
             print("   Proceeding with execution...")
 
         print()
@@ -285,14 +340,18 @@ class DirectBigQueryExecutor:
                 "data": rows,
                 "row_count": len(rows),
                 "bytes_processed": query_job.total_bytes_processed,
-                "bytes_estimated": estimation.get("estimated_bytes") if estimation["status"] == "success" else None,
+                "bytes_estimated": estimation.get("estimated_bytes")
+                if estimation["status"] == "success"
+                else None,
                 "timestamp": datetime.now().isoformat(),
             }
 
             print("✅ Query executed successfully!")
             print(f"   Rows returned: {len(rows)}")
-            print(f"   Bytes processed: {self.format_bytes(query_job.total_bytes_processed)}")
-            
+            print(
+                f"   Bytes processed: {self.format_bytes(query_job.total_bytes_processed)}"
+            )
+
             # Show estimation accuracy if available
             if estimation["status"] == "success":
                 estimated = estimation["estimated_bytes"]
@@ -306,7 +365,7 @@ class DirectBigQueryExecutor:
         except Exception as e:
             error_msg = str(e)
             print(f"❌ Query failed: {error_msg}")
-            
+
             # Create the basic error response
             error_response = {
                 "status": "error",
@@ -315,7 +374,7 @@ class DirectBigQueryExecutor:
                 "estimation": estimation if estimation["status"] == "success" else None,
                 "timestamp": datetime.now().isoformat(),
             }
-            
+
             return error_response
 
     def save_results_to_file(
@@ -479,11 +538,13 @@ class DirectBigQueryExecutor:
 
         return saved_files
 
-    def get_ai_error_suggestions(self, sql: str, error: str, original_question: str) -> str:
+    def get_ai_error_suggestions(
+        self, sql: str, error: str, original_question: str
+    ) -> str:
         """Use AI to analyze query errors and suggest fixes"""
         if not self.ai_generator or not self.ai_generator.model:
             return None
-        
+
         try:
             # Create a focused prompt for error analysis
             error_prompt = f"""
@@ -499,7 +560,7 @@ class DirectBigQueryExecutor:
 
             Available Context:
             - Project: {self.project_id}
-            - Available datasets: {', '.join(self.metadata_cache.datasets_cache.keys()) if self.metadata_cache else 'Unknown'}
+            - Available datasets: {", ".join(self.metadata_cache.datasets_cache.keys()) if self.metadata_cache else "Unknown"}
 
             Please provide:
             1. A brief explanation of what caused the error
@@ -510,23 +571,132 @@ class DirectBigQueryExecutor:
             """
 
             print("🤖 Asking AI for error analysis...")
-            
+
             response = self.ai_generator.model.generate_content(error_prompt)
             suggestion = response.text.strip()
-            
+
             return suggestion
-            
+
         except Exception as e:
             print(f"⚠️  Could not get AI suggestions: {e}")
             return None
 
+    def clean_sql_query(self, query: str) -> str:
+        """Clean SQL query by removing markdown formatting and extra whitespace"""
+        # Handle None input
+        if query is None:
+            return ""
+
+        # Remove markdown code blocks
+        query = re.sub(r"```sql\s*", "", query)
+        query = re.sub(r"```\s*", "", query)
+
+        # Remove leading/trailing whitespace
+        query = query.strip()
+
+        # Remove any extra newlines or spaces
+        query = " ".join(query.split())
+
+        return query
+
+    def generate_query_with_schema(self, user_question: str, schemas: dict) -> str:
+        """Generate SQL query with table schema context"""
+        schema_context = self.build_schema_context(schemas)
+
+        prompt = f"""Given the following table schemas and user request, generate a BigQuery SQL query.
+
+TABLE SCHEMAS:
+{schema_context}
+
+USER REQUEST:
+{user_question}
+
+Please generate a valid BigQuery SQL query that:
+1. Uses the correct column names from the provided schemas
+2. Uses appropriate data types and functions
+3. Follows BigQuery SQL syntax
+4. Is optimized for performance
+
+Return ONLY the SQL query without any explanations, markdown formatting, or code blocks.
+
+SQL Query:"""
+
+        print("🤖 Using schema-aware AI to generate query...")
+        response = self.ai_generator.model.generate_content(prompt)
+        sql_query = response.text.strip()
+
+        return sql_query
+
+    def describe_table_data(self, dataset_name: str, table_name: str) -> str:
+        """Get AI-powered description of table data"""
+        if not self.ai_generator or not self.ai_generator.model:
+            return "❌ AI not available for table descriptions"
+
+        return self.metadata_cache.get_table_description(dataset_name, table_name)
+
+    def estimate_query_bytes(self, sql: str) -> Dict[str, Any]:
+        """Estimate bytes that will be processed by a query"""
+        try:
+            # Create a dry run job
+            job_config = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
+            query_job = self.client.query(sql, job_config=job_config)
+
+            estimated_bytes = query_job.total_bytes_processed
+            # BigQuery pricing: $5 per TB
+            estimated_cost_usd = (estimated_bytes / (1024**4)) * 5
+
+            return {
+                "status": "success",
+                "estimated_bytes": estimated_bytes,
+                "estimated_cost_usd": estimated_cost_usd,
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "error": str(e),
+                "estimated_bytes": 0,
+                "estimated_cost_usd": 0,
+            }
+
+    def format_bytes(self, bytes_value: int) -> str:
+        """Format bytes in human readable format"""
+        if bytes_value == 0:
+            return "0 B"
+
+        units = ["B", "KB", "MB", "GB", "TB"]
+        size = bytes_value
+        unit_index = 0
+
+        while size >= 1024 and unit_index < len(units) - 1:
+            size /= 1024
+            unit_index += 1
+
+        return f"{size:.1f} {units[unit_index]}"
+
+    def should_confirm_execution(self, estimation: Dict[str, Any]) -> bool:
+        """Check if query execution should be confirmed based on size/cost"""
+        if estimation["status"] != "success":
+            return False
+
+        # Threshold: 100MB or $0.01
+        return (
+            estimation["estimated_bytes"] > 100 * 1024 * 1024
+            or estimation["estimated_cost_usd"] > 0.01
+        )
+
+    def should_force_confirm_execution(self, estimation: Dict[str, Any]) -> bool:
+        """Check if query should force confirmation even in CLI mode"""
+        if estimation["status"] != "success":
+            return False
+
+        # Force confirmation for very expensive queries: 500MB or $0.025
+        return (
+            estimation["estimated_bytes"] > 500 * 1024 * 1024
+            or estimation["estimated_cost_usd"] > 0.025
+        )
+
     def ask_and_execute(self, question: str) -> Dict[str, Any]:
-        """Main method to process questions and execute appropriate actions"""
-        if not question.strip():
-            return {"status": "error", "error": "Empty question provided"}
-        
-        print(f"\n❓ Question: {question}")
-        
+        """Main method to process a question and execute the appropriate action"""
         # Handle special commands first
         is_special, response = self.handle_special_commands(question)
         if is_special:
@@ -534,319 +704,131 @@ class DirectBigQueryExecutor:
             return {
                 "status": "success",
                 "question": question,
+                "response": response,
                 "is_metadata_command": True,
-                "response": response
+                "timestamp": datetime.now().isoformat(),
             }
-        
-        # Handle describe command separately
-        if question.lower().strip().startswith('describe '):
-            table_ref = question[9:].strip()  # Remove 'describe ' prefix
-            if '.' in table_ref:
-                dataset_name, table_name = table_ref.split('.', 1)
-                description = self.describe_table_data(dataset_name, table_name)
-                print(description)
-                return {
-                    "status": "success",
-                    "question": question,
-                    "is_metadata_command": True,
-                    "response": description
-                }
-            else:
-                error_msg = "❌ Please specify table as 'dataset.table' (e.g., 'describe bi.hosts')"
-                print(error_msg)
-                return {"status": "error", "error": error_msg}
-        
-        # For regular questions that need AI, check if AI is available
-        if not self.ai_generator or not self.ai_generator.model:
-            error_msg = "❌ AI query generation not available. Please check your GEMINI_API_KEY."
-            print(error_msg)
-            return {"status": "error", "error": error_msg}
-        
-        # Generate SQL using AI
-        try:
-            sql = self.generate_query(question)
-            if not sql:
-                error_msg = "❌ Could not generate SQL query from your question"
-                print(error_msg)
-                return {"status": "error", "error": error_msg}
-            
-            print(f"🤖 Generated SQL:\n{sql}")
+
+        # Generate SQL query using AI
+        sql_query, error = self.generate_query(question)
+
+        if error:
+            return {
+                "status": "error",
+                "question": question,
+                "error": error,
+                "timestamp": datetime.now().isoformat(),
+            }
+
+        # Clean the generated SQL
+        sql_query = self.clean_sql_query(sql_query)
+
+        # Execute the query
+        result = self.execute_query(sql_query)
+        result["question"] = question
+
+        # If query failed, try to get AI suggestions
+        if result["status"] == "error":
             print()
-            
-            # Execute the query
-            result = self.execute_query(sql)
-            result["question"] = question  # Add question to result for saving
-            
-            # If query failed, try to get AI suggestions
-            if result["status"] == "error":
-                print("\n🔍 Analyzing error with AI...")
-                suggestion = self.get_ai_error_suggestions(sql, result["error"], question)
-                if suggestion:
-                    print("\n💡 AI Suggestions:")
-                    print("=" * 50)
-                    print(suggestion)
-                    print("=" * 50)
-                    result["ai_suggestion"] = suggestion
-                else:
-                    print("\n💡 Try:")
-                    print("• Check if the dataset/table names are correct")
-                    print("• Use 'datasets' to see available datasets")
-                    print("• Use 'explore <dataset>' to see tables")
-                    print("• Rephrase your question more specifically")
-            
-            # Display results
-            self.display_results(result)
-            
-            return result
-            
-        except Exception as e:
-            error_msg = f"Failed to process question: {e}"
-            print(f"❌ {error_msg}")
-            return {"status": "error", "error": error_msg}
+            print("🔍 Analyzing error with AI...")
+            suggestions = self.get_ai_error_suggestions(
+                sql_query, result["error"], question
+            )
 
-    def describe_table_data(self, dataset_name: str, table_name: str) -> str:
-        """Analyze a table and provide a human-readable description of its data"""
-        if not self.metadata_cache:
-            return "❌ Metadata cache not available. Please ensure BigQuery is properly connected."
-        
-        table_key = f"{dataset_name}.{table_name}"
-        
-        # Check if we have a cached description
-        if table_key in self.metadata_cache.columns_cache:
-            cache_data = self.metadata_cache.columns_cache.get(table_key, {})
-            cached_description = cache_data.get("description")
-            
-            if cached_description:
-                print(f"📋 Using cached description for '{table_key}'")
-                return cached_description
-        
-        # Get schema first if not cached
-        if table_key not in self.metadata_cache.columns_cache:
-            self.metadata_cache.refresh_columns_for_table(dataset_name, table_name)
-        
-        cache_data = self.metadata_cache.columns_cache.get(table_key, {})
-        columns = cache_data.get("columns", [])
-        
-        if not columns:
-            return f"❌ Cannot describe table '{table_key}' - table not found or no columns available."
-        
-        print(f"🔍 Generating new description for '{table_key}'...")
-        
-        try:
-            # Get sample data and basic statistics
-            sample_query = f"""
-            SELECT 
-                COUNT(*) as total_rows,
-                COUNT(DISTINCT {columns[0]['name']}) as distinct_values_in_first_col
-            FROM `{self.project_id}.{dataset_name}.{table_name}`
-            LIMIT 1
-            """
-            
-            stats_result = self.client.query(sample_query).result()
-            stats = list(stats_result)[0]
-            
-            # Get a few sample rows to understand the data
-            column_names = [col['name'] for col in columns[:5]]  # First 5 columns
-            sample_data_query = f"""
-            SELECT {', '.join(column_names)}
-            FROM `{self.project_id}.{dataset_name}.{table_name}`
-            LIMIT 3
-            """
-            
-            sample_result = self.client.query(sample_data_query).result()
-            sample_rows = list(sample_result)
-            
-            # Analyze column types and patterns
-            analysis = self._analyze_table_structure(columns, sample_rows, stats)
-            
-            # Cache the generated description
-            if table_key in self.metadata_cache.columns_cache:
-                self.metadata_cache.columns_cache[table_key]["description"] = analysis
-                self.metadata_cache.columns_cache[table_key]["description_timestamp"] = datetime.now().isoformat()
-                
-                # Save updated cache to file
-                self.metadata_cache.save_cache_to_file()
-                print(f"💾 Cached description for '{table_key}'")
-            
-            return analysis
-            
-        except Exception as e:
-            return f"❌ Could not analyze table '{table_key}': {e}"
-    
-    def _analyze_table_structure(self, columns, sample_rows, stats) -> str:
-        """Analyze table structure and generate human-readable description"""
-        
-        # Categorize columns by type and likely purpose
-        timestamps = []
-        identifiers = []
-        text_fields = []
-        numeric_fields = []
-        status_fields = []
-        
-        for col in columns:
-            col_name = col['name'].lower()
-            col_type = col['type']
-            
-            if 'timestamp' in col_name or 'time' in col_name or 'date' in col_name:
-                timestamps.append(col['name'])
-            elif col_type in ['STRING', 'TEXT']:
-                if any(keyword in col_name for keyword in ['id', 'uuid', 'key', 'hash']):
-                    identifiers.append(col['name'])
-                elif any(keyword in col_name for keyword in ['status', 'state', 'type', 'action', 'event']):
-                    status_fields.append(col['name'])
-                else:
-                    text_fields.append(col['name'])
-            elif col_type in ['INT64', 'FLOAT64', 'NUMERIC']:
-                numeric_fields.append(col['name'])
-        
-        # Generate description
-        description = f"📊 **Table Analysis:**\n\n"
-        
-        # Basic stats
-        total_rows = f"{stats.total_rows:,}" if stats.total_rows else "Unknown"
-        description += f"🔢 **Size:** {total_rows} rows, {len(columns)} columns\n\n"
-        
-        # Infer table purpose from column patterns
-        purpose = self._infer_table_purpose(columns, timestamps, identifiers, text_fields, status_fields)
-        description += f"🎯 **Purpose:** {purpose}\n\n"
-        
-        # Column breakdown
-        description += f"📋 **Data Structure:**\n"
-        
-        if timestamps:
-            description += f"   ⏰ **Time tracking:** {', '.join(timestamps[:3])}\n"
-        if identifiers:
-            description += f"   🆔 **Identifiers:** {', '.join(identifiers[:3])}\n"
-        if status_fields:
-            description += f"   📊 **Status/Category fields:** {', '.join(status_fields[:3])}\n"
-        if numeric_fields:
-            description += f"   🔢 **Metrics/Numbers:** {', '.join(numeric_fields[:3])}\n"
-        if text_fields:
-            description += f"   📝 **Text data:** {', '.join(text_fields[:3])}\n"
-        
-        # Show truncation if needed
-        if len(columns) > 10:
-            description += f"   ... and {len(columns) - 10} more columns\n"
-        
-        # Sample data insights
-        if sample_rows:
-            description += f"\n🔍 **Sample insights:**\n"
-            first_row = dict(sample_rows[0])
-            
-            # Look for patterns in sample data
-            for col_name, value in list(first_row.items())[:3]:
-                if value is not None:
-                    value_str = str(value)
-                    if len(value_str) > 50:
-                        value_str = value_str[:47] + "..."
-                    description += f"   • {col_name}: {value_str}\n"
-        
-        description += f"\n💡 Use 'sample {columns[0]['name']}' for more detailed data exploration"
-        
-        return description
-    
-    def _infer_table_purpose(self, columns, timestamps, identifiers, text_fields, status_fields) -> str:
-        """Infer the likely purpose of the table based on column patterns"""
-        
-        col_names_str = ' '.join([col['name'].lower() for col in columns])
-        
-        # Pattern matching for common table types
-        if any(keyword in col_names_str for keyword in ['log', 'event', 'audit']):
-            return "Appears to be a **log/event tracking table** - records activities or events over time"
-        
-        elif any(keyword in col_names_str for keyword in ['user', 'account', 'profile', 'customer']):
-            return "Looks like a **user/account management table** - stores information about users or accounts"
-        
-        elif any(keyword in col_names_str for keyword in ['order', 'transaction', 'payment', 'purchase']):
-            return "Seems to be a **transaction/order table** - tracks business transactions or purchases"
-        
-        elif any(keyword in col_names_str for keyword in ['product', 'item', 'inventory', 'catalog']):
-            return "Appears to be a **product/inventory table** - manages product or item information"
-        
-        elif any(keyword in col_names_str for keyword in ['metric', 'stat', 'performance', 'analytics']):
-            return "Looks like an **analytics/metrics table** - stores performance data and statistics"
-        
-        elif any(keyword in col_names_str for keyword in ['session', 'visit', 'click', 'page']):
-            return "Seems to be a **web analytics table** - tracks user interactions and website activity"
-        
-        elif len(timestamps) > 0 and len(status_fields) > 0:
-            return "Appears to be a **tracking/monitoring table** - records status changes over time"
-        
-        elif len(identifiers) > 2:
-            return "Looks like a **reference/mapping table** - connects different entities or systems"
-        
-        else:
-            return "**General data table** - contains mixed data types for various purposes"
+            if suggestions:
+                print()
+                print("💡 AI Suggestions:")
+                print("=" * 50)
+                print(suggestions)
+                print("=" * 50)
+                result["ai_suggestions"] = suggestions
 
-    def estimate_query_bytes(self, sql: str) -> Dict[str, Any]:
-        """Estimate bytes that will be processed by a query without executing it"""
-        if not self.client:
-            return {"status": "error", "error": "BigQuery client not initialized"}
+        return result
 
-        try:
-            # Create a dry run job to estimate bytes
-            job_config = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
-            query_job = self.client.query(sql, job_config=job_config)
-            
-            estimated_bytes = query_job.total_bytes_processed
-            estimated_mb = estimated_bytes / (1024 * 1024)
-            estimated_gb = estimated_bytes / (1024 * 1024 * 1024)
-            
-            # Estimate cost (approximate, as of 2024: $5 per TB)
-            estimated_cost_usd = (estimated_bytes / (1024 * 1024 * 1024 * 1024)) * 5
-            
-            return {
-                "status": "success",
-                "estimated_bytes": estimated_bytes,
-                "estimated_mb": estimated_mb,
-                "estimated_gb": estimated_gb,
-                "estimated_cost_usd": estimated_cost_usd,
-                "sql": sql
-            }
-            
-        except Exception as e:
-            return {
-                "status": "error", 
-                "error": str(e),
-                "sql": sql
-            }
 
-    def format_bytes(self, bytes_count: int) -> str:
-        """Format bytes in human-readable format"""
-        if bytes_count == 0:
-            return "0 bytes"
-        elif bytes_count < 1024:
-            return f"{bytes_count} bytes"
-        elif bytes_count < 1024 * 1024:
-            return f"{bytes_count / 1024:.1f} KB"
-        elif bytes_count < 1024 * 1024 * 1024:
-            return f"{bytes_count / (1024 * 1024):.1f} MB"
-        else:
-            return f"{bytes_count / (1024 * 1024 * 1024):.2f} GB"
+def extract_table_references(user_input: str, default_project: str) -> list:
+    """Extract table references from user input"""
+    import re
 
-    def should_confirm_execution(self, estimation: Dict[str, Any]) -> bool:
-        """Determine if user confirmation is needed based on query size"""
-        if estimation["status"] != "success":
-            return False
-            
-        # Thresholds for confirmation
-        bytes_threshold = 100 * 1024 * 1024  # 100 MB
-        cost_threshold = 0.01  # $0.01 USD
-        
-        return (estimation["estimated_bytes"] > bytes_threshold or 
-                estimation["estimated_cost_usd"] > cost_threshold)
+    pattern = r"(?:([a-zA-Z0-9_-]+)\.)?([a-zA-Z0-9_-]+)\.([a-zA-Z0-9_-]+)"
+    matches = re.findall(pattern, user_input)
 
-    def should_force_confirm_execution(self, estimation: Dict[str, Any]) -> bool:
-        """Determine if confirmation is REQUIRED even in command-line mode"""
-        if estimation["status"] != "success":
-            return False
-            
-        # More aggressive thresholds that require confirmation even in CLI mode
-        force_bytes_threshold = 500 * 1024 * 1024  # 500 MB
-        force_cost_threshold = 0.025  # $0.025 USD
-        
-        return (estimation["estimated_bytes"] > force_bytes_threshold or 
-                estimation["estimated_cost_usd"] > force_cost_threshold)
+    tables = []
+    for match in matches:
+        project_id = match[0] or default_project
+        dataset_id = match[1]
+        table_id = match[2]
+        tables.append((project_id, dataset_id, table_id))
+
+    return tables
+
+
+def get_table_schema_from_existing_command(
+    project_id: str, dataset_id: str, table_id: str, client, cache
+):
+    """Use the existing schema command functionality to get table schema"""
+    # First check if we have it cached
+    cached_schema = cache.get_table_schema(project_id, dataset_id, table_id)
+    if cached_schema:
+        print(f"✅ Found cached schema for {project_id}.{dataset_id}.{table_id}")
+        return cached_schema
+
+    # Fetch from BigQuery
+    try:
+        table = client.get_table(f"{project_id}.{dataset_id}.{table_id}")
+
+        schema_info = {
+            "table_id": f"{project_id}.{dataset_id}.{table_id}",
+            "columns": [
+                {
+                    "name": field.name,
+                    "type": field.field_type,
+                    "mode": field.mode,
+                    "description": field.description or "",
+                }
+                for field in table.schema
+            ],
+            "num_rows": table.num_rows,
+            "size_bytes": table.num_bytes,
+        }
+
+        print(f"📋 Available columns in {project_id}.{dataset_id}.{table_id}:")
+        for col in schema_info["columns"]:
+            print(f"  - {col['name']} ({col['type']})")
+
+        # Save to cache
+        cache.save_table_schema(project_id, dataset_id, table_id, schema_info)
+        print(f"💾 Schema cached for {project_id}.{dataset_id}.{table_id}")
+
+        return schema_info
+
+    except Exception as e:
+        print(f"❌ Error fetching schema: {e}")
+        return None
+
+
+def build_schema_context(schemas: dict) -> str:
+    """Build formatted schema context for the prompt"""
+    if not schemas:
+        return "No table schemas available."
+
+    context_parts = []
+    for table_name, schema in schemas.items():
+        columns_info = []
+        for col in schema["columns"]:
+            col_desc = f"  - {col['name']} ({col['type']}, {col['mode']})"
+            if col["description"]:
+                col_desc += f" - {col['description']}"
+            columns_info.append(col_desc)
+
+        table_info = f"""Table: {table_name}
+Columns:
+{chr(10).join(columns_info)}
+Rows: {schema.get("num_rows", "Unknown")}"""
+        context_parts.append(table_info)
+
+    return "\n\n".join(context_parts)
+
 
 def main():
     """Main entry point"""
@@ -879,6 +861,7 @@ def main():
         # Command line question
         question = " ".join(sys.argv[1:])
         result = executor.ask_and_execute(question)
+        executor.display_results(result)
 
         # Final summary for command-line usage
         if result["status"] == "success":
@@ -925,6 +908,7 @@ def main():
 
                 if question:
                     result = executor.ask_and_execute(question)
+                    executor.display_results(result)
 
                     # Show quick summary
                     if result["status"] == "success":
@@ -937,4 +921,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("\n👋 Goodbye!")
+        sys.exit(0)
